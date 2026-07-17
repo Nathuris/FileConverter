@@ -1,0 +1,8 @@
+.build/
+DerivedData/
+*.xcuserdata
+*.xcworkspace/xcuserdata/
+*.dmg
+temp-*
+FileConverter.app
+FileConverter-preview.png

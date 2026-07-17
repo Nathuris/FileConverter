@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<users>
+  <user><name>张三</name><age>28</age><city>北京</city></user>
+  <user><name>李四</name><age>35</age><city>上海</city></user>
+  <user><name>王五</name><age>22</age><city>深圳</city></user>
+</users>
