@@ -23,10 +23,10 @@ final class AudioConverter: FormatConverter, @unchecked Sendable {
     }
 
     func supportedOutputFormats() -> [ConversionFormat] {
-        // MP3 / FLAC 在 macOS 新版本中 afconvert 已支持编码
-        var formats: [ConversionFormat] = [.aac, .alac, .aiff, .wav, .caf, .m4a, .mp3, .flac]
+        var formats: [ConversionFormat] = [.aac, .alac, .aiff, .wav, .caf, .m4a, .flac]
+        // MP3 编码需要 ffmpeg（afconvert 只支持 MP3 解码，不支持编码）
         if toolDetector?.isAvailable("ffmpeg") == true {
-            formats.append(contentsOf: [.ogg, .opus])
+            formats.append(contentsOf: [.mp3, .ogg, .opus])
         }
         return formats
     }
@@ -105,7 +105,6 @@ final class AudioConverter: FormatConverter, @unchecked Sendable {
         case .caf:  return ("LEI16", "caff")
         case .m4a:  return ("aac", "m4af")
         case .flac: return ("flac", "flac")
-        case .mp3:  return ("mp3", "mp3")
         default:    return ("aac", "m4af")
         }
     }
