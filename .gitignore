@@ -4,7 +4,9 @@ DerivedData/
 *.xcworkspace/xcuserdata/
 *.dmg
 temp-*
-FileConverter.app
+# 打包产物。用通配符是为了兜住 macOS / iCloud 同步冲突时自动生成的
+# 「FileConverter 2.app」这类副本，否则它们会一直显示成未跟踪文件。
+FileConverter*.app
 FileConverter-preview.png
 
 .DS_Store
