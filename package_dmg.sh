@@ -17,7 +17,7 @@ rm -rf "$APP_DIR" "$DMG_NAME" "$TEMP_DMG" "dmg-staging"
 
 # 2. 构建 release 版本
 echo "🔨 构建 release 版本..."
-swift build -c release
+bash build_release.sh
 
 # 3. 创建 .app bundle
 echo "📱 创建 $APP_DIR..."

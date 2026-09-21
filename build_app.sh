@@ -8,7 +8,7 @@ set -e
 cd "$(dirname "$0")"
 
 echo "🔨 正在编译 FileConverter..."
-swift build -c release 2>&1 | tail -2
+bash build_release.sh 2>&1 | tail -2
 
 echo "📦 创建 App Bundle..."
 APP="FileConverter.app"
@@ -17,6 +17,7 @@ mkdir -p "$APP/Contents/MacOS"
 mkdir -p "$APP/Contents/Resources"
 cp .build/release/FileConverter "$APP/Contents/MacOS/"
 cp Resources/Info.plist "$APP/Contents/"
+cp Resources/FileConverter.icns "$APP/Contents/Resources/" 2>/dev/null || true
 echo -n "APPL????" > "$APP/Contents/PkgInfo"
 
 echo "✅ 完成！App: $APP"

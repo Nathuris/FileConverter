@@ -4,7 +4,7 @@ set -e
 cd "$(dirname "$0")"
 
 echo "🔨 swift build..."
-swift build -c release
+bash build_release.sh
 echo "📱 xcodeproj..."
 python3 gen_xcode.py
 echo "📦 DMG..."
