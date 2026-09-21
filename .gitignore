@@ -7,3 +7,4 @@ temp-*
 FileConverter.app
 FileConverter-preview.png
 
+.DS_Store
