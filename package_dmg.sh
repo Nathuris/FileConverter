@@ -4,7 +4,7 @@
 set -e
 
 APP_NAME="FileConverter"
-VERSION="1.0.0"
+VERSION="1.1.0"
 APP_DIR="$APP_NAME.app"
 DMG_NAME="$APP_NAME-$VERSION.dmg"
 TEMP_DMG="temp-$DMG_NAME"
