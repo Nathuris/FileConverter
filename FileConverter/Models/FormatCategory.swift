@@ -42,8 +42,10 @@ enum FormatCategory: String, CaseIterable, Identifiable, Codable {
         case .archives:   return ["ditto"]
         case .textData:   return ["plutil"]
         case .ebooks:     return ["pandoc"]
+        // 字体依赖 Python + fonttools 包；类别先以 python3 为准，转换器内部再查 fonttools
         case .fonts:      return ["python3"]
-        case .cad3D:      return ["python3"]
+        // 3D 主要靠系统 Model I/O，不强制额外工具
+        case .cad3D:      return []
         }
     }
 

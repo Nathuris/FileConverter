@@ -50,14 +50,18 @@ final class EbookConverter: FormatConverter, @unchecked Sendable {
         targetFormat: ConversionFormat,
         settings: ConversionSettings
     ) async throws -> URL {
-        let useCalibre = toolDetector?.isAvailable("ebook-convert") == true &&
-            [ConversionFormat.mobi, .azw3, .fb2].contains(sourceFormat) || [ConversionFormat.mobi, .azw3, .fb2].contains(targetFormat)
+        // 只有装了 Calibre，且源或目标属于 Kindle 系格式时，才走 ebook-convert
+        let calibreFormats: Set<ConversionFormat> = [.mobi, .azw3, .fb2]
+        let needsCalibre = calibreFormats.contains(sourceFormat) || calibreFormats.contains(targetFormat)
+        let useCalibre = toolDetector?.isAvailable("ebook-convert") == true && needsCalibre
 
         if useCalibre {
             return try await convertWithCalibre(input: input, target: targetFormat)
-        } else {
-            return try await convertWithPandoc(input: input, target: targetFormat)
         }
+        if needsCalibre {
+            throw ProcessRunnerError.executableNotFound(name: "ebook-convert")
+        }
+        return try await convertWithPandoc(input: input, target: targetFormat)
     }
 
     private func convertWithPandoc(input: URL, target: ConversionFormat) async throws -> URL {

@@ -44,6 +44,8 @@ struct FileListView: View {
             dropAddBar
 
             // 文件列表
+            // 注意：onDrop 只挂在上方细条，不要挂整页——整页接收拖放会抢走
+            // 行内「目标格式」菜单的点击。
             ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(files) { file in
@@ -67,10 +69,6 @@ struct FileListView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
-            handleDrop(providers: providers)
-            return true
-        }
     }
 
     /// 顶部的快速拖放区
@@ -98,31 +96,32 @@ struct FileListView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 4)
         )
+        .contentShape(Rectangle())
         .onTapGesture {
             NotificationCenter.default.post(name: .addFiles, object: nil)
+        }
+        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
+            handleDrop(providers: providers)
+            return true
         }
     }
 
     private func handleDrop(providers: [NSItemProvider]) {
-        let group = DispatchGroup()
-        var urls: [URL] = []
-        let lock = NSLock()
-
-        for provider in providers {
-            group.enter()
-            _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                if let url = url {
-                    lock.lock()
+        // 与空白页拖放区同一套读法：macOS 拖文件给的是「文件路径的二进制」，
+        // 用 loadObject(URL) 经常读不到。
+        Task {
+            var urls: [URL] = []
+            for provider in providers {
+                if let identifier = provider.registeredTypeIdentifiers.first,
+                   let data = try? await provider.loadItem(forTypeIdentifier: identifier) as? Data,
+                   let url = URL(dataRepresentation: data, relativeTo: nil) {
                     urls.append(url)
-                    lock.unlock()
                 }
-                group.leave()
             }
-        }
-
-        group.notify(queue: .main) {
-            if !urls.isEmpty {
-                onFilesDropped(urls)
+            await MainActor.run {
+                if !urls.isEmpty {
+                    onFilesDropped(urls)
+                }
             }
         }
     }

@@ -14,27 +14,35 @@ final class ImageConverter: FormatConverter, @unchecked Sendable {
         self.toolDetector = toolDetector
     }
 
+    /// sips 写起来比较稳的格式
+    private static let sipsWritable: Set<ConversionFormat> = [
+        .jpeg, .png, .gif, .bmp, .tiff, .heic, .jp2, .tga, .ico, .icns, .pdfImage
+    ]
+
+    /// 更适合交给 ImageMagick 的输出
+    private static let magickPreferred: Set<ConversionFormat> = [
+        .webp, .svg, .avif, .jxl, .psd, .exr, .dds
+    ]
+
     func supportedInputFormats() -> [ConversionFormat] {
         var formats: [ConversionFormat] = [
-            .jpeg, .png, .gif, .bmp, .tiff, .heic, .webp, .ico, .svg,
+            .jpeg, .png, .gif, .bmp, .tiff, .heic, .webp, .ico,
             .psd, .avif, .jp2, .jxl, .tga, .exr, .dds, .icns, .pdfImage,
             .cr2, .nef, .arw, .dng, .orf, .raf, .rw2, .pef
         ]
-        // ImageMagick 可以读更多格式
         if toolDetector?.isAvailable("magick") == true {
-            formats.append(contentsOf: [.svg])  // 更好的 SVG 支持
+            formats.append(.svg)
         }
         return formats
     }
 
     func supportedOutputFormats() -> [ConversionFormat] {
         var formats: [ConversionFormat] = [
-            .jpeg, .png, .gif, .bmp, .tiff, .heic, .jp2, .tga, .exr,
-            .dds, .ico, .icns, .avif, .pdfImage
+            .jpeg, .png, .gif, .bmp, .tiff, .heic, .jp2, .tga,
+            .ico, .icns, .pdfImage
         ]
-        // ImageMagick 可以写更多格式
         if toolDetector?.isAvailable("magick") == true {
-            formats.append(contentsOf: [.webp, .svg])
+            formats.append(contentsOf: [.webp, .svg, .avif, .jxl, .psd, .exr, .dds])
         }
         return formats
     }
@@ -45,14 +53,10 @@ final class ImageConverter: FormatConverter, @unchecked Sendable {
         var pairs: [(ConversionFormat, ConversionFormat)] = []
 
         for input in inputs {
-            for output in outputs {
-                if input != output && !input.isRAW && canConvert(source: input, target: output) {
+            for output in outputs where input != output {
+                if input.isRAW {
                     pairs.append((input, output))
-                }
-            }
-            // RAW 格式只能转换输出（sips 读但不写 RAW）
-            if input.isRAW {
-                for output in outputs {
+                } else if canConvert(source: input, target: output) {
                     pairs.append((input, output))
                 }
             }
@@ -63,11 +67,8 @@ final class ImageConverter: FormatConverter, @unchecked Sendable {
     func canConvert(source: ConversionFormat, target: ConversionFormat) -> Bool {
         guard source.category == .images && target.category == .images else { return false }
         guard target != source else { return false }
-        // RAW 只能做源格式
         guard !target.isRAW else { return false }
-
-        let outputs = supportedOutputFormats()
-        return outputs.contains(target)
+        return supportedOutputFormats().contains(target)
     }
 
     func convert(
@@ -76,32 +77,99 @@ final class ImageConverter: FormatConverter, @unchecked Sendable {
         targetFormat: ConversionFormat,
         settings: ConversionSettings
     ) async throws -> URL {
-        let sipsPath = toolDetector?.path(for: "sips") ?? "/usr/bin/sips"
         let outputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
             .appendingPathExtension(targetFormat.preferredExtension)
 
-        // sips 格式映射
-        let sipsFormat = mapToSipsFormat(targetFormat)
+        let preferMagick = Self.magickPreferred.contains(targetFormat)
+            || sourceFormat == .svg
+            || sourceFormat == .webp
+            || sourceFormat == .jxl
+
+        if preferMagick, toolDetector?.isAvailable("magick") == true {
+            return try await convertWithMagick(input: input, output: outputURL, target: targetFormat, settings: settings)
+        }
+
+        // 默认走 sips；失败且有 ImageMagick 时再回退
+        if Self.sipsWritable.contains(targetFormat) {
+            do {
+                return try await convertWithSips(input: input, output: outputURL, target: targetFormat, settings: settings)
+            } catch {
+                if toolDetector?.isAvailable("magick") == true {
+                    return try await convertWithMagick(input: input, output: outputURL, target: targetFormat, settings: settings)
+                }
+                throw error
+            }
+        }
+
+        if toolDetector?.isAvailable("magick") == true {
+            return try await convertWithMagick(input: input, output: outputURL, target: targetFormat, settings: settings)
+        }
+
+        throw ProcessRunnerError.executionFailed(
+            exitCode: -1,
+            stderr: "无法输出 \(targetFormat.displayName)：请安装 ImageMagick（brew install imagemagick）"
+        )
+    }
+
+    private func convertWithSips(
+        input: URL,
+        output: URL,
+        target: ConversionFormat,
+        settings: ConversionSettings
+    ) async throws -> URL {
+        let sipsPath = toolDetector?.path(for: "sips") ?? "/usr/bin/sips"
+        let sipsFormat = mapToSipsFormat(target)
 
         var args = ["-s", "format", sipsFormat]
 
-        // 图片质量（jpeg 支持）
-        if targetFormat == .jpeg || targetFormat == .heic {
+        if target == .jpeg || target == .heic {
             let quality = Int(settings.imageQuality * 100)
             args.append(contentsOf: ["-s", "formatOptions", "\(quality)"])
         }
 
-        // 尺寸限制
         if let maxDim = settings.imageMaxDimension {
             args.append(contentsOf: ["-Z", "\(maxDim)"])
         }
 
-        args.append(contentsOf: [input.path, "--out", outputURL.path])
-
+        args.append(contentsOf: [input.path, "--out", output.path])
         _ = try await ProcessRunner.run(executable: sipsPath, arguments: args)
+        try verifyNonEmpty(output)
+        return output
+    }
 
-        return outputURL
+    private func convertWithMagick(
+        input: URL,
+        output: URL,
+        target: ConversionFormat,
+        settings: ConversionSettings
+    ) async throws -> URL {
+        guard let magickPath = toolDetector?.path(for: "magick") else {
+            throw ProcessRunnerError.executableNotFound(name: "magick")
+        }
+
+        var args = [input.path]
+
+        if let maxDim = settings.imageMaxDimension {
+            args.append(contentsOf: ["-resize", "\(maxDim)x\(maxDim)>"])
+        }
+
+        if target == .jpeg || target == .webp || target == .avif || target == .heic {
+            let quality = Int(settings.imageQuality * 100)
+            args.append(contentsOf: ["-quality", "\(quality)"])
+        }
+
+        args.append(output.path)
+        _ = try await ProcessRunner.run(executable: magickPath, arguments: args)
+        try verifyNonEmpty(output)
+        return output
+    }
+
+    private func verifyNonEmpty(_ url: URL) throws {
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        guard size > 0 else {
+            throw ProcessRunnerError.executionFailed(exitCode: -1, stderr: "图片转换完成但输出文件为空")
+        }
     }
 
     // MARK: - 图片预览
@@ -113,7 +181,6 @@ final class ImageConverter: FormatConverter, @unchecked Sendable {
         sourceFormat: ConversionFormat,
         targetFormat: ConversionFormat
     ) async throws -> Data? {
-        // 用 sips 生成小缩略图
         let sipsPath = toolDetector?.path(for: "sips") ?? "/usr/bin/sips"
         let previewURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("preview-\(UUID().uuidString).jpg")

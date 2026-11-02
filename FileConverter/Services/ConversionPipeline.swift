@@ -139,12 +139,7 @@ actor ConversionPipeline {
         let startTime = Date()
 
         do {
-            // 先输出到临时目录
-            let tempDir = FileManager.default.temporaryDirectory
-                .appendingPathComponent("FileConverter-\(UUID().uuidString.prefix(8))")
-            try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-
-            // 执行转换
+            // 执行转换（各转换器自己写到临时文件）
             let outputURL = try await converter.convert(
                 input: file.sourceURL,
                 sourceFormat: file.detectedFormat,
@@ -161,11 +156,9 @@ actor ConversionPipeline {
                 try FileManager.default.moveItem(at: outputURL, to: finalURL)
             }
 
-            // 清理临时目录
-            try? FileManager.default.removeItem(at: tempDir)
-
             let duration = Date().timeIntervalSince(startTime)
-            let outputSize = (try? outputURL.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
+            // 文件已挪到最终位置，必须量 finalURL；旧临时路径已经不存在
+            let outputSize = (try? finalURL.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
 
             return ConversionResult(
                 sourceFile: file,

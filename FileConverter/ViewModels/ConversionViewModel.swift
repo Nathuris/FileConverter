@@ -87,10 +87,19 @@ final class ConversionViewModel {
         converters[.cad3D] = CADConverter(toolDetector: toolDetector)
     }
 
+    /// 若转换器未挂上（例如启动时序导致丢失），补挂一次
+    func ensureConvertersReady() {
+        if converters.isEmpty {
+            setupConverters()
+        }
+    }
+
     // MARK: - 文件管理
 
     /// 添加文件到转换队列
     func addFiles(_ urls: [URL]) {
+        ensureConvertersReady()
+
         for url in urls {
             guard let format = formatDetector.detectFormat(of: url) else {
                 print("无法识别文件格式：\(url.lastPathComponent)")
@@ -103,19 +112,22 @@ final class ConversionViewModel {
             // 智能推荐目标格式
             let suggestedTarget = suggestTargetFormat(for: format)
 
-            var file = ConversionFile(
+            let file = ConversionFile(
                 sourceURL: url,
                 detectedFormat: format,
                 targetFormat: suggestedTarget,
                 fileSize: fileSize
             )
-
-            // 生成缩略图（在后台）
-            Task {
-                file.thumbnail = await generateThumbnail(for: url)
-            }
-
+            let fileID = file.id
             files.append(file)
+
+            // 生成缩略图后写回列表里对应那一项（不能改局部副本）
+            Task {
+                let thumb = await generateThumbnail(for: url)
+                if let index = files.firstIndex(where: { $0.id == fileID }) {
+                    files[index].thumbnail = thumb
+                }
+            }
         }
 
         if !files.isEmpty {
@@ -286,6 +298,8 @@ final class ConversionViewModel {
         switch sourceFormat {
         // 图片
         case .heic, .avif, .jxl, .jp2, .tiff, .psd, .tga, .exr, .dds:
+            return .png
+        case .jpeg:
             return .png
         case .png, .webp, .bmp, .ico, .icns, .svg:
             return .jpeg

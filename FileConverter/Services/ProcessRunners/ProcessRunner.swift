@@ -11,7 +11,11 @@ enum ProcessRunnerError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .executionFailed(let code, let stderr):
-            return "命令执行失败（退出码 \(code)）：\(stderr)"
+            let detail = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            if detail.isEmpty {
+                return "命令执行失败（退出码 \(code)）"
+            }
+            return "命令执行失败（退出码 \(code)）：\(detail)"
         case .timedOut(let interval):
             return "命令超时（\(Int(interval)) 秒）"
         case .executableNotFound(let name):
@@ -47,7 +51,53 @@ struct ProcessRunner {
         timeout: TimeInterval = 300,
         workingDirectory: URL? = nil
     ) async throws -> Result {
+        try await runInternal(
+            executable: executable,
+            arguments: arguments,
+            environment: environment,
+            timeout: timeout,
+            workingDirectory: workingDirectory,
+            progressParser: nil,
+            onProgress: nil
+        )
+    }
+
+    // MARK: - 带进度的执行
+
+    static func runWithProgress(
+        executable: String,
+        arguments: [String],
+        progressParser: @escaping @Sendable (String) -> Double?,
+        onProgress: (@Sendable (Double) -> Void)? = nil,
+        timeout: TimeInterval = 3600
+    ) async throws -> Result {
+        try await runInternal(
+            executable: executable,
+            arguments: arguments,
+            environment: nil,
+            timeout: timeout,
+            workingDirectory: nil,
+            progressParser: progressParser,
+            onProgress: onProgress
+        )
+    }
+
+    // MARK: - 内部实现
+
+    private static func runInternal(
+        executable: String,
+        arguments: [String],
+        environment: [String: String]?,
+        timeout: TimeInterval,
+        workingDirectory: URL?,
+        progressParser: (@Sendable (String) -> Double?)?,
+        onProgress: (@Sendable (Double) -> Void)?
+    ) async throws -> Result {
         let startTime = Date()
+
+        guard FileManager.default.isExecutableFile(atPath: executable) || !executable.hasPrefix("/") else {
+            throw ProcessRunnerError.executableNotFound(name: executable)
+        }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
@@ -65,73 +115,75 @@ struct ProcessRunner {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
-        // 使用 Task 来支持取消和超时
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Result, Error>) in
-                process.terminationHandler = { proc in
-                    let duration = Date().timeIntervalSince(startTime)
-                    let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-                    let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-                    let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
-                    let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+        // 一边跑一边读管道，避免 ffmpeg 之类把缓冲区写满后双方卡死
+        let outputBox = OutputBox()
+        let stdoutHandle = stdoutPipe.fileHandleForReading
+        let stderrHandle = stderrPipe.fileHandleForReading
 
-                    if proc.terminationStatus != 0 {
-                        continuation.resume(throwing: ProcessRunnerError.executionFailed(
-                            exitCode: proc.terminationStatus, stderr: stderr
-                        ))
-                    } else {
-                        continuation.resume(returning: Result(
-                            exitCode: proc.terminationStatus,
-                            stdout: stdout, stderr: stderr, duration: duration
-                        ))
+        stdoutHandle.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            outputBox.appendStdout(data)
+            if let parser = progressParser, let onProgress,
+               let text = String(data: data, encoding: .utf8) {
+                for line in text.split(whereSeparator: \.isNewline) {
+                    if let value = parser(String(line)) {
+                        onProgress(value)
                     }
                 }
-
-                do {
-                    try process.run()
-                } catch {
-                    continuation.resume(throwing: error)
-                }
             }
-        } onCancel: {
-            process.terminate()
         }
-    }
-
-    // MARK: - 带进度的执行
-
-    static func runWithProgress(
-        executable: String,
-        arguments: [String],
-        progressParser: @Sendable (String) -> Double?,
-        timeout: TimeInterval = 3600
-    ) async throws -> Result {
-        let startTime = Date()
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
+        stderrHandle.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            outputBox.appendStderr(data)
+            // ffmpeg 进度有时在 stderr
+            if let parser = progressParser, let onProgress,
+               let text = String(data: data, encoding: .utf8) {
+                for line in text.split(whereSeparator: \.isNewline) {
+                    if let value = parser(String(line)) {
+                        onProgress(value)
+                    }
+                }
+            }
+        }
 
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Result, Error>) in
+                let state = ResumeOnce(continuation: continuation)
+
+                let timeoutFlag = TimeoutFlag()
+
                 process.terminationHandler = { proc in
+                    stdoutHandle.readabilityHandler = nil
+                    stderrHandle.readabilityHandler = nil
+
+                    // 再读干净残留
+                    let restOut = stdoutHandle.readDataToEndOfFile()
+                    let restErr = stderrHandle.readDataToEndOfFile()
+                    outputBox.appendStdout(restOut)
+                    outputBox.appendStderr(restErr)
+
                     let duration = Date().timeIntervalSince(startTime)
-                    let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-                    let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-                    let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
-                    let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+                    let stdout = outputBox.stdoutString
+                    let stderr = outputBox.stderrString
+
+                    if timeoutFlag.isSet {
+                        state.resume(throwing: ProcessRunnerError.timedOut(after: timeout))
+                        return
+                    }
+
+                    if Task.isCancelled {
+                        state.resume(throwing: ProcessRunnerError.cancelled)
+                        return
+                    }
 
                     if proc.terminationStatus != 0 {
-                        continuation.resume(throwing: ProcessRunnerError.executionFailed(
+                        state.resume(throwing: ProcessRunnerError.executionFailed(
                             exitCode: proc.terminationStatus, stderr: stderr
                         ))
                     } else {
-                        continuation.resume(returning: Result(
+                        state.resume(returning: Result(
                             exitCode: proc.terminationStatus,
                             stdout: stdout, stderr: stderr, duration: duration
                         ))
@@ -141,11 +193,31 @@ struct ProcessRunner {
                 do {
                     try process.run()
                 } catch {
-                    continuation.resume(throwing: error)
+                    stdoutHandle.readabilityHandler = nil
+                    stderrHandle.readabilityHandler = nil
+                    state.resume(throwing: error)
+                    return
+                }
+
+                // 真正生效的超时：到点就杀掉进程
+                if timeout > 0 {
+                    Task {
+                        try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                        if process.isRunning {
+                            timeoutFlag.mark()
+                            process.terminate()
+                            try? await Task.sleep(nanoseconds: 2_000_000_000)
+                            if process.isRunning {
+                                kill(process.processIdentifier, SIGKILL)
+                            }
+                        }
+                    }
                 }
             }
         } onCancel: {
-            process.terminate()
+            if process.isRunning {
+                process.terminate()
+            }
         }
     }
 
@@ -190,5 +262,73 @@ struct ProcessRunner {
         } catch {
             return nil
         }
+    }
+}
+
+// MARK: - 辅助：线程安全输出缓冲 + 只 resume 一次
+
+private final class OutputBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stdout = Data()
+    private var stderr = Data()
+
+    func appendStdout(_ data: Data) {
+        lock.lock(); stdout.append(data); lock.unlock()
+    }
+
+    func appendStderr(_ data: Data) {
+        lock.lock(); stderr.append(data); lock.unlock()
+    }
+
+    var stdoutString: String {
+        lock.lock(); defer { lock.unlock() }
+        return String(data: stdout, encoding: .utf8) ?? ""
+    }
+
+    var stderrString: String {
+        lock.lock(); defer { lock.unlock() }
+        return String(data: stderr, encoding: .utf8) ?? ""
+    }
+}
+
+private final class ResumeOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<ProcessRunner.Result, Error>?
+    private var resumed = false
+
+    init(continuation: CheckedContinuation<ProcessRunner.Result, Error>) {
+        self.continuation = continuation
+    }
+
+    func resume(returning value: ProcessRunner.Result) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !resumed, let c = continuation else { return }
+        resumed = true
+        continuation = nil
+        c.resume(returning: value)
+    }
+
+    func resume(throwing error: Error) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !resumed, let c = continuation else { return }
+        resumed = true
+        continuation = nil
+        c.resume(throwing: error)
+    }
+}
+
+private final class TimeoutFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    func mark() {
+        lock.lock(); value = true; lock.unlock()
+    }
+
+    var isSet: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return value
     }
 }

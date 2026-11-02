@@ -1,7 +1,9 @@
 import SwiftUI
 
 struct ContentView: View {
-    @State var viewModel: ConversionViewModel
+    // 由 App 持有唯一实例；这里用 @Bindable，不要再包一层 @State，
+    // 否则容易和启动时挂好的转换器各用各的对象。
+    @Bindable var viewModel: ConversionViewModel
     @State private var dropVM = DropZoneViewModel()
     @State private var selectedCategory: FormatCategory = .all
 
@@ -40,6 +42,12 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .clearAllFiles)) { _ in viewModel.clearAll() }
         .onReceive(NotificationCenter.default.publisher(for: .addFiles)) { _ in openFilePicker() }
         .onReceive(NotificationCenter.default.publisher(for: .removeSelectedFiles)) { _ in viewModel.removeSelectedFiles() }
+        .onReceive(NotificationCenter.default.publisher(for: .startConversion)) { _ in
+            if viewModel.canConvert {
+                selectedCategory = .all
+                viewModel.startConversion()
+            }
+        }
     }
 
     @ViewBuilder

@@ -3,16 +3,25 @@ import SwiftUI
 /// FileConverter App 入口
 @main
 struct FileConverterApp: App {
-    @State private var viewModel = ConversionViewModel()
+    @State private var viewModel: ConversionViewModel
 
     init() {
         ToolDetector.shared.scanAllSync()
-        viewModel.setupConverters()
+        // 必须先建好 ViewModel、挂上转换器，再交给 @State。
+        // 若在 @State 已经包好之后再 setup，SwiftUI 可能丢弃这次修改，
+        // 结果是转换器字典一直是空的：按钮灰掉、格式菜单点了没内容。
+        let vm = ConversionViewModel()
+        vm.setupConverters()
+        _viewModel = State(initialValue: vm)
     }
 
     var body: some Scene {
         WindowGroup {
             ContentView(viewModel: viewModel)
+                .onAppear {
+                    // 双保险：窗口出现时若转换器丢失则重新挂上
+                    viewModel.ensureConvertersReady()
+                }
         }
         .commands {
             CommandGroup(replacing: .newItem) {

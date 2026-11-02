@@ -11,17 +11,28 @@ final class FormatDetector: Sendable {
     func detectFormat(of url: URL) -> ConversionFormat? {
         let ext = url.pathExtension.lowercased()
 
+        // PDF：统一当文档处理。枚举里还有「图片 PDF」，若走通用 UTI 匹配
+        // 会先撞上它，结果被送进图片转换器。
+        if ext == "pdf" {
+            return .pdfDoc
+        }
+
+        // RAW：系统 UTI 分不清具体相机品牌，优先信扩展名
+        if let rawByExt = matchByExtension(ext), rawByExt.isRAW {
+            return rawByExt
+        }
+
         // 1. 尝试用 UTType 识别
         if let utType = try? url.resourceValues(forKeys: [.typeIdentifierKey]).typeIdentifier,
            let utt = UTType(utType) {
-            if let format = matchByUTType(utt) {
+            if let format = matchByUTType(utt, preferredExtension: ext) {
                 return format
             }
         }
 
         // 2. 通过文件扩展名创建 UTType 再试
         if let utt = UTType(filenameExtension: ext) {
-            if let format = matchByUTType(utt) {
+            if let format = matchByUTType(utt, preferredExtension: ext) {
                 return format
             }
         }
@@ -37,16 +48,27 @@ final class FormatDetector: Sendable {
 
     // MARK: - 通过 UTType 匹配
 
-    private func matchByUTType(_ utType: UTType) -> ConversionFormat? {
-        // 遍历所有格式，找到匹配的
+    private func matchByUTType(_ utType: UTType, preferredExtension: String = "") -> ConversionFormat? {
+        // PDF 一律按文档处理（避免命中 pdfImage）
+        if utType.conforms(to: .pdf) {
+            return .pdfDoc
+        }
+
+        // RAW：UTI 只有「原始图像」一层，用扩展名区分品牌
+        if utType.conforms(to: .rawImage) {
+            if let byExt = matchByExtension(preferredExtension), byExt.isRAW {
+                return byExt
+            }
+            return .dng
+        }
+
+        // 遍历所有格式，找到匹配的（跳过会抢占通用 UTI 的歧义项）
         for format in ConversionFormat.allCases {
+            // pdfImage 与各类 RAW 已在上面单独处理
+            if format == .pdfImage || format.isRAW { continue }
             guard let formatUT = format.utType else { continue }
 
             if utType.conforms(to: formatUT) || utType == formatUT {
-                // 特殊处理：区分 RAW 格式
-                if format.isRAW {
-                    return format
-                }
                 return format
             }
         }
@@ -88,7 +110,6 @@ final class FormatDetector: Sendable {
         if utType.conforms(to: .bmp) { return .bmp }
         if utType.conforms(to: .tiff) { return .tiff }
         if utType.conforms(to: .heic) { return .heic }
-        if utType.conforms(to: .pdf) { return .pdfDoc }
         if utType.conforms(to: .mp3) { return .mp3 }
         if utType.conforms(to: .wav) { return .wav }
         if utType.conforms(to: .mpeg4Movie) { return .mp4 }

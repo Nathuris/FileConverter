@@ -66,6 +66,11 @@ final class ToolDetector: ToolProviding, @unchecked Sendable {
     // MARK: - 工具查找
 
     private func findToolSync(_ name: String) -> String? {
+        // fonttools 是 Python 包，不是独立可执行文件；用 import 探测
+        if name == "fonttools" {
+            return findFontToolsMarker()
+        }
+
         // 1. 自定义路径
         if let cp = customPaths[name], FileManager.default.isExecutableFile(atPath: cp) {
             return cp
@@ -101,6 +106,35 @@ final class ToolDetector: ToolProviding, @unchecked Sendable {
             }
         }
 
+        return nil
+    }
+
+    /// 探测 fontTools 是否已安装；返回可用的 python3 路径作为「工具路径」标记
+    private func findFontToolsMarker() -> String? {
+        let candidates: [String] = {
+            var list: [String] = []
+            if let py = toolPaths["python3"] { list.append(py) }
+            list.append(contentsOf: ["/usr/bin/python3", "/opt/homebrew/bin/python3", "/usr/local/bin/python3"])
+            return list
+        }()
+
+        for python in candidates {
+            guard FileManager.default.isExecutableFile(atPath: python) else { continue }
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: python)
+            p.arguments = ["-c", "import fontTools"]
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            do {
+                try p.run()
+                p.waitUntilExit()
+                if p.terminationStatus == 0 {
+                    return python
+                }
+            } catch {
+                continue
+            }
+        }
         return nil
     }
 

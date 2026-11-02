@@ -45,26 +45,49 @@ final class FontConverter: FormatConverter, @unchecked Sendable {
             throw ProcessRunnerError.executableNotFound(name: "fonttools")
         }
 
-        let pythonPath = toolDetector?.path(for: "python3") ?? "/usr/bin/python3"
+        // fonttools 探测成功时，path(for:) 存的是可用的 python3
+        let pythonPath = toolDetector?.path(for: "fonttools")
+            ?? toolDetector?.path(for: "python3")
+            ?? "/usr/bin/python3"
         let outputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
             .appendingPathExtension(targetFormat.preferredExtension)
 
-        // 使用 fonttools 的 ttx 命令：先导出 XML，调整格式，再导入
-        // 简化版：直接用 pyftsubset 或 ttx
+        let flavor: String
+        switch targetFormat {
+        case .woff2: flavor = "'woff2'"
+        case .woff:  flavor = "'woff'"
+        default:     flavor = "None"
+        }
+
+        // 用环境变量传路径，避免路径里的引号弄坏脚本
         let script = """
-        import sys
+        import os
         from fontTools.ttLib import TTFont
-        font = TTFont('\(input.path)')
-        font.flavor = \(targetFormat == .woff2 ? "'woff2'" : targetFormat == .woff ? "'woff'" : "None")
-        font.save('\(outputURL.path)')
+        font = TTFont(os.environ['FC_INPUT'])
+        font.flavor = \(flavor)
+        font.save(os.environ['FC_OUTPUT'])
         """
 
-        let tempScript = FileManager.default.temporaryDirectory.appendingPathComponent("fontconv-\(UUID().uuidString.prefix(8)).py")
+        let tempScript = FileManager.default.temporaryDirectory
+            .appendingPathComponent("fontconv-\(UUID().uuidString.prefix(8)).py")
         try script.write(to: tempScript, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: tempScript) }
 
-        _ = try await ProcessRunner.run(executable: pythonPath, arguments: [tempScript.path])
+        var env = ProcessInfo.processInfo.environment
+        env["FC_INPUT"] = input.path
+        env["FC_OUTPUT"] = outputURL.path
+
+        _ = try await ProcessRunner.run(
+            executable: pythonPath,
+            arguments: [tempScript.path],
+            environment: env
+        )
+
+        let size = (try? outputURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        guard size > 0 else {
+            throw ProcessRunnerError.executionFailed(exitCode: -1, stderr: "字体转换完成但输出文件为空")
+        }
         return outputURL
     }
 }

@@ -1,10 +1,11 @@
 import Foundation
+import ModelIO
 
 /// 3D 模型格式转换器 — Model I/O（系统自带）+ 可选 assimp
 final class CADConverter: FormatConverter, @unchecked Sendable {
     let displayName = "3D 模型转换器"
     let category = FormatCategory.cad3D
-    let requiredTools = ["python3"]
+    let requiredTools: [String] = []
     let optionalTools = ["assimp"]
     var supportsProgress: Bool { false }
 
@@ -50,45 +51,56 @@ final class CADConverter: FormatConverter, @unchecked Sendable {
             .appendingPathComponent(UUID().uuidString)
             .appendingPathExtension(targetFormat.preferredExtension)
 
-        // OBJ ↔ USDZ 可以用 Model I/O
-        if (sourceFormat == .obj && targetFormat == .usdz) || (sourceFormat == .usdz && targetFormat == .obj) {
-            return try await convertWithModelIO(input: input, output: outputURL, target: targetFormat)
+        // Model I/O 能直接处理 OBJ / STL / USDZ
+        let modelIOFormats: Set<ConversionFormat> = [.obj, .stl, .usdz]
+        if modelIOFormats.contains(sourceFormat) && modelIOFormats.contains(targetFormat) {
+            return try await convertWithModelIO(input: input, output: outputURL)
         }
 
-        // 其他格式用 assimp
+        // FBX 等格式交给 assimp
         if toolDetector?.isAvailable("assimp") == true {
             let assimpPath = toolDetector?.path(for: "assimp") ?? "assimp"
             _ = try await ProcessRunner.run(
                 executable: assimpPath,
                 arguments: ["export", input.path, outputURL.path]
             )
+            try verifyNonEmpty(outputURL)
             return outputURL
         }
 
         throw ProcessRunnerError.executionFailed(
             exitCode: -1,
-            stderr: "需要安装 assimp 来转换 3D 格式。安装命令：brew install assimp"
+            stderr: "需要安装 assimp 来转换该 3D 格式。安装命令：brew install assimp"
         )
     }
 
-    private func convertWithModelIO(input: URL, output: URL, target: ConversionFormat) async throws -> URL {
-        // 使用 Python + Model I/O 桥接
-        let pythonPath = toolDetector?.path(for: "python3") ?? "/usr/bin/python3"
+    private func convertWithModelIO(input: URL, output: URL) async throws -> URL {
+        try await Task.detached(priority: .userInitiated) {
+            let asset = MDLAsset(url: input)
+            do {
+                try asset.export(to: output)
+            } catch {
+                throw ProcessRunnerError.executionFailed(
+                    exitCode: -1,
+                    stderr: "3D 模型导出失败：\(error.localizedDescription)"
+                )
+            }
 
-        let script = """
-        import sys
-        # Model I/O 转换需要 PyObjC 或直接调用命令行
-        # 简化版：直接复制文件并标记为已转换
-        import shutil
-        shutil.copy('\(input.path)', '\(output.path)')
-        print("OK")
-        """
+            let size = (try? output.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            guard size > 0 else {
+                throw ProcessRunnerError.executionFailed(
+                    exitCode: -1,
+                    stderr: "3D 模型导出失败：输出文件为空。源文件可能损坏，或格式不受系统支持"
+                )
+            }
+            return output
+        }.value
+    }
 
-        let tempScript = FileManager.default.temporaryDirectory.appendingPathComponent("cadconv-\(UUID().uuidString.prefix(8)).py")
-        try script.write(to: tempScript, atomically: true, encoding: .utf8)
-        defer { try? FileManager.default.removeItem(at: tempScript) }
-
-        _ = try await ProcessRunner.run(executable: pythonPath, arguments: [tempScript.path])
-        return output
+    private func verifyNonEmpty(_ url: URL) throws {
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        guard size > 0 else {
+            throw ProcessRunnerError.executionFailed(exitCode: -1, stderr: "转换完成但输出文件为空")
+        }
     }
 }
