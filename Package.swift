@@ -15,10 +15,9 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "FileConverter",
-            path: "FileConverter",
-            resources: [
-                .process("Resources")
-            ]
+            path: "FileConverter"
+            // Info.plist / 图标由 package_dmg.sh、build_app.sh 手工拷进 .app，
+            // 不走 SwiftPM 资源打包（仓库里的 Resources 在项目根目录）。
         )
     ]
 )
